@@ -1,0 +1,327 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset='utf-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
+    <meta name='mobile-web-app-capable' content='yes'>
+    <meta name='apple-mobile-web-app-capable' content='yes'>
+    <title>WebXR AR Snow</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #000;
+        color: #fff;
+        font-family: sans-serif;
+      }
+
+      #overlay {
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        color: #fff;
+        z-index: 999;
+      }
+
+      #xr-button {
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="overlay">
+      <header>
+        <details open>
+          <summary>Barebones WebXR DOM Overlay</summary>
+          <p>
+            This sample demonstrates an "immersive-ar" session that draws a snow-like
+            effect all around the user. There is no surface detection; the snow is rendered
+            in a 360-degree sphere around the camera.
+          </p>
+          <div id="session-info"></div>
+          <div id="pose"></div>
+          <div id="warning-zone"></div>
+          <button id="xr-button" class="barebones-button" disabled>XR not found</button>
+        </details>
+      </header>
+    </div>
+
+    <script type="module">
+      // --- SNOW SETUP CODE (from your snippet, adapted) ---
+      // Assume ShaderProgram is available globally or has been imported.
+      // If it's not defined, you'll need to provide its class definition.
+
+      const snowflake = 'data:image/png;base64,iVBORw0K...' // truncated for brevity, use your full data URI
+
+      const count = 7000;
+      let wind = {
+        current: 0,
+        force: 0.1,
+        target: 0.1,
+        min: 0.1,
+        max: 0.25,
+        easing: 0.005
+      };
+
+      let snow; // We'll instantiate it after WebXR session starts
+      let startTime = Date.now();
+
+      // --- WEBXR SETUP CODE ---
+      let xrButton = document.getElementById('xr-button');
+      let xrSession = null;
+      let xrRefSpace = null;
+      let gl = null;
+
+      function checkSupportedState() {
+        navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+          if (supported) {
+            xrButton.innerHTML = 'Enter AR';
+          } else {
+            xrButton.innerHTML = 'AR not found';
+          }
+          xrButton.disabled = !supported;
+        });
+      }
+
+      function initXR() {
+        if (!window.isSecureContext) {
+          let message = "WebXR unavailable due to insecure context";
+          document.getElementById("warning-zone").innerText = message;
+        }
+
+        if (navigator.xr) {
+          xrButton.addEventListener('click', onButtonClicked);
+          navigator.xr.addEventListener('devicechange', checkSupportedState);
+          checkSupportedState();
+        }
+      }
+
+      function onButtonClicked() {
+        if (!xrSession) {
+            navigator.xr.requestSession('immersive-ar', {
+                optionalFeatures: ['dom-overlay'],
+                domOverlay: {root: document.getElementById('overlay')}
+            }).then(onSessionStarted, onRequestSessionError);
+        } else {
+          xrSession.end();
+        }
+      }
+
+      function onSessionStarted(session) {
+        xrSession = session;
+        xrButton.innerHTML = 'Exit AR';
+
+        if (session.domOverlayState) {
+          document.getElementById('session-info').innerHTML = 'DOM Overlay type: ' + session.domOverlayState.type;
+        }
+
+        session.addEventListener('end', onSessionEnded);
+        let canvas = document.createElement('canvas');
+        gl = canvas.getContext('webgl', { xrCompatible: true });
+        session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+
+        session.requestReferenceSpace('local').then((refSpace) => {
+          xrRefSpace = refSpace;
+
+          // Initialize the snow shader program here, after we have a GL context
+          snow = new ShaderProgram(gl, {
+            depthTest: false,
+            texture: snowflake,
+            uniforms: {
+              worldSize: { type: 'vec3', value: [0, 0, 0] },
+              gravity: { type: 'float', value: 100 },
+              wind:{ type: 'float', value: 0 },
+              u_time: { type: 'float', value: 0 },
+              u_projection: { type: 'mat4', value: new Float32Array(16) },
+            },
+            buffers: {
+              position: { size: 3, data: [] },
+              color: { size: 4, data: [] },
+              size: { size: 1, data: [] },
+              rotation: { size: 3, data: [] },
+              speed: { size: 3, data: [] },
+            },
+            vertex: `
+              precision highp float;
+
+              attribute vec4 a_position;
+              attribute vec4 a_color;
+              attribute vec3 a_rotation;
+              attribute vec3 a_speed;
+              attribute float a_size;
+
+              uniform float u_time;
+              uniform mat4 u_projection;
+              uniform vec3 u_worldSize;
+              uniform float u_gravity;
+              uniform float u_wind;
+
+              varying vec4 v_color;
+              varying float v_rotation;
+
+              // For a simple AR scenario, we can treat camera at origin, rotation only.
+              // We'll just place snow around the origin space. If you have a view matrix,
+              // incorporate it here. For simplicity, we assume pos is in camera space.
+              void main() {
+                v_color = a_color;
+                v_rotation = a_rotation.x + u_time * a_rotation.y;
+
+                vec3 pos = a_position.xyz;
+
+                pos.x = mod(pos.x + u_time + u_wind * a_speed.x, u_worldSize.x * 2.0) - u_worldSize.x;
+                pos.y = mod(pos.y - u_time * a_speed.y * u_gravity, u_worldSize.y * 2.0) - u_worldSize.y;
+
+                pos.x += sin(u_time * a_speed.z) * a_rotation.z;
+                pos.z += cos(u_time * a_speed.z) * a_rotation.z;
+
+                gl_Position = u_projection * vec4(pos, 1.0);
+                gl_PointSize = (a_size / gl_Position.w) * 100.0;
+              }`,
+            fragment: `
+              precision highp float;
+
+              uniform sampler2D u_texture;
+
+              varying vec4 v_color;
+              varying float v_rotation;
+
+              void main() {
+                vec2 rotated = vec2(
+                  cos(v_rotation) * (gl_PointCoord.x - 0.5) + sin(v_rotation) * (gl_PointCoord.y - 0.5) + 0.5,
+                  cos(v_rotation) * (gl_PointCoord.y - 0.5) - sin(v_rotation) * (gl_PointCoord.x - 0.5) + 0.5
+                );
+
+                vec4 snowflake = texture2D(u_texture, rotated);
+
+                gl_FragColor = vec4(snowflake.rgb, snowflake.a * v_color.a);
+              }`,
+            onResize(w, h, dpi) {
+              const position = [], color = [], size = [], rotation = [], speed = [];
+
+              const height = 110;
+              const width = w / h * height;
+              const depth = 80;
+
+              for (let i = 0; i < w / h * count; i++) {
+                position.push(
+                  -width + Math.random() * width * 2,
+                  -height + Math.random() * height * 2,
+                  Math.random() * depth * 2
+                );
+
+                speed.push(
+                  1 + Math.random(),
+                  1 + Math.random(),
+                  Math.random() * 10
+                ); // x, y, sinusoid
+
+                rotation.push(
+                  Math.random() * 2.0 * Math.PI,
+                  Math.random() * 20,
+                  Math.random() * 10
+                );
+
+                color.push(
+                  1, 1, 1, 0.1 + Math.random() * 0.2
+                );
+
+                size.push(
+                  5 * Math.random() * 5 * ( h * dpi / 1000 )
+                );
+              }
+
+              this.uniforms.worldSize = [ width, height, depth ];
+
+              this.buffers.position = position;
+              this.buffers.color = color;
+              this.buffers.size = size;
+              this.buffers.rotation = rotation;
+              this.buffers.speed = speed;
+
+              this.updateBuffers();
+            },
+            onUpdate(delta) {
+              wind.force += ( wind.target - wind.force ) * wind.easing;
+              wind.current += wind.force * ( delta * 0.2 );
+              this.uniforms.wind = wind.current;
+
+              if (Math.random() > 0.995) {
+                wind.target = ( wind.min + Math.random() * ( wind.max - wind.min ) ) * (Math.random() > 0.5 ? -1 : 1);
+              }
+            }
+          });
+
+          // Resize the snow system to match AR framebuffer
+          const baseLayer = session.renderState.baseLayer;
+          snow.onResize(baseLayer.framebufferWidth, baseLayer.framebufferHeight, window.devicePixelRatio || 1);
+
+          session.requestAnimationFrame(onXRFrame);
+        });
+      }
+
+      function onRequestSessionError(ex) {
+        alert("Failed to start immersive AR session.");
+        console.error(ex.message);
+      }
+
+      function onEndSession(session) {
+        session.end();
+      }
+
+      function onSessionEnded(event) {
+        xrSession = null;
+        xrButton.innerHTML = 'Enter AR';
+        document.getElementById('session-info').innerHTML = '';
+        gl = null;
+      }
+
+      function onXRFrame(t, frame) {
+        let session = frame.session;
+        session.requestAnimationFrame(onXRFrame);
+
+        // Bind the baseLayer framebuffer
+        gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
+
+        const pose = frame.getViewerPose(xrRefSpace);
+        if (pose) {
+          const p = pose.transform.position;
+          document.getElementById('pose').innerText = "Position: " +
+            p.x.toFixed(3) + ", " + p.y.toFixed(3) + ", " + p.z.toFixed(3);
+
+          // For simplicity, use the first view (usually the headset's main eye)
+          const view = pose.views[0];
+          const viewport = session.renderState.baseLayer.getViewport(view);
+          gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+
+          // Clear the background
+          gl.clearColor(0.0, 0.0, 0.0, 0.0);
+          gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+          // Update time
+          let elapsed = (Date.now() - startTime) / 1000.0;
+          snow.uniforms.u_time = elapsed;
+
+          // Set projection matrix from the view
+          // Note: The vertex shader expects u_projection only. Here we combine the
+          // camera's projection *and* view. If ShaderProgram is flexible, you could
+          // separate them. For now, let's just assume we supply projection directly,
+          // and assume positions are in local space. For a real AR scenario,
+          // you'd multiply by the inverse of the XRView's transform to position
+          // the snow relative to the user.
+          // We'll do just projection here since the shader treats pos as camera-relative.
+          snow.uniforms.u_projection = view.projectionMatrix;
+
+          // Update and draw snow
+          const delta = 1/60; // Approximate frame time, or use t from requestAnimationFrame
+          snow.onUpdate(delta);
+          snow.draw(); // Assuming ShaderProgram has a .draw() method to render points
+        } else {
+          // No pose available
+          document.getElementById('pose').innerText = "Position: (null pose)";
+        }
+      }
+
+      initXR();
+    </script>
+  </body>
+</html>
