@@ -33,26 +33,27 @@
       text-align: center;
       cursor: pointer;
     }
+    #status {
+      text-align: center;
+      margin-top: 10px;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
   <div id="overlay">
-    <button id="enter-ar">Enter AR</button>
+    <button id="enter-ar" disabled>Loading...</button>
     <div id="status"></div>
   </div>
 
   <script type="module">
-    // Ensure Three.js is fully loaded before running the application
     import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js';
 
-    // Wrap the entire application in a function to ensure proper scoping
     function initWebXRSnowApp() {
-      // SnowParticleSystem class definition
       class SnowParticleSystem {
         constructor(options = {}) {
           this.particleCount = options.particleCount || 5000;
           this.worldSize = options.worldSize || { x: 20, y: 20, z: 20 };
-          
           this.initParticleSystem();
         }
 
@@ -61,22 +62,16 @@
           const positions = [];
           const colors = [];
           const sizes = [];
-
           const color = new THREE.Color();
 
           for (let i = 0; i < this.particleCount; i++) {
-            // Distribute particles around the camera
             const x = (Math.random() - 0.5) * this.worldSize.x;
             const y = (Math.random() - 0.5) * this.worldSize.y;
             const z = (Math.random() - 0.5) * this.worldSize.z;
 
             positions.push(x, y, z);
-
-            // Soft white color with varying transparency
             color.setHSL(0.6, 0.1, 0.9);
             colors.push(color.r, color.g, color.b);
-
-            // Varying particle sizes
             sizes.push(Math.random() * 0.5);
           }
 
@@ -98,50 +93,38 @@
 
         update(time, cameraPosition) {
           const positions = this.particleSystem.geometry.attributes.position.array;
-          
           for (let i = 0; i < positions.length; i += 3) {
-            // Gentle snow movement with wind effect
-            positions[i] += Math.sin(time * 0.001 + i) * 0.01;  // X-axis wind
-            positions[i + 1] -= 0.02;  // Gravity
-            
-            // Reset particles that fall below camera
+            positions[i] += Math.sin(time * 0.001 + i) * 0.01;  // wind on X
+            positions[i + 1] -= 0.02;  // gravity
+
             if (positions[i + 1] < -this.worldSize.y / 2) {
               positions[i + 1] = this.worldSize.y / 2;
             }
           }
-
-          // Center snow around camera
-          this.particleSystem.position.copy(cameraPosition);
+          this.particleSystem.position.set(cameraPosition.x, cameraPosition.y, cameraPosition.z);
           this.particleSystem.geometry.attributes.position.needsUpdate = true;
         }
       }
 
-      // WebXRSnowApp class definition
       class WebXRSnowApp {
         constructor() {
-          // Use querySelector to ensure elements exist
           this.enterARButton = document.querySelector('#enter-ar');
           this.statusElement = document.querySelector('#status');
 
-          // Bind methods explicitly in the constructor
           this.handleEnterAR = this.handleEnterAR.bind(this);
           this.onSessionEnded = this.onSessionEnded.bind(this);
           this.onXRFrame = this.onXRFrame.bind(this);
 
-          // Initialize properties
           this.xrSession = null;
           this.xrRefSpace = null;
           this.scene = null;
-          this.camera = null;
           this.renderer = null;
           this.snowSystem = null;
 
-          // Check XR support
           this.checkXRSupport();
         }
 
         async checkXRSupport() {
-          // Defensive check for XR support
           if (!('xr' in navigator)) {
             this.updateStatus('WebXR not supported');
             return;
@@ -149,7 +132,6 @@
 
           try {
             const isSupported = await navigator.xr.isSessionSupported('immersive-ar');
-            
             if (isSupported) {
               this.enterARButton.textContent = 'Enter AR';
               this.enterARButton.disabled = false;
@@ -174,42 +156,46 @@
           if (!this.xrSession) {
             try {
               this.xrSession = await navigator.xr.requestSession('immersive-ar', {
+                requiredFeatures: ['local'],
                 optionalFeatures: ['dom-overlay'],
                 domOverlay: { root: document.getElementById('overlay') }
               });
-              
+
+              // Once we have a session, initialize the scene.
               this.initScene();
+
+              // Request the reference space and then set it on the renderer.
               this.xrRefSpace = await this.xrSession.requestReferenceSpace('local');
+              this.renderer.xr.setSession(this.xrSession);
+              this.renderer.xr.setReferenceSpace(this.xrRefSpace);
+
               this.xrSession.addEventListener('end', this.onSessionEnded);
               this.xrSession.requestAnimationFrame(this.onXRFrame);
-              
+
               this.enterARButton.textContent = 'Exit AR';
+              this.updateStatus('AR session started');
             } catch (error) {
               console.error('Could not start AR session:', error);
               this.updateStatus('Failed to start AR');
             }
           } else {
+            // If we already have a session, end it
             this.xrSession.end();
           }
         }
 
         initScene() {
           this.scene = new THREE.Scene();
+          // We create a dummy camera; the real camera will be controlled by XR
           this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-          
-          this.renderer = new THREE.WebGLRenderer({
-            alpha: true,
-            canvas: document.createElement('canvas')
-          });
-          
+
+          this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+          this.renderer.setSize(window.innerWidth, window.innerHeight);
           this.renderer.xr.enabled = true;
-          this.renderer.xr.setReferenceSpace(this.xrRefSpace);
 
-          this.snowSystem = new SnowParticleSystem({
-            particleCount: 5000,
-            worldSize: { x: 20, y: 20, z: 20 }
-          });
+          document.body.appendChild(this.renderer.domElement);
 
+          this.snowSystem = new SnowParticleSystem({ particleCount: 5000, worldSize: { x: 20, y: 20, z: 20 } });
           this.scene.add(this.snowSystem.particleSystem);
         }
 
@@ -219,26 +205,28 @@
 
           const pose = frame.getViewerPose(this.xrRefSpace);
           if (pose) {
-            // Update snow system based on camera position and movement
-            const cameraPosition = pose.transform.position;
+            const { position } = pose.transform;
+            const cameraPosition = { x: position.x, y: position.y, z: position.z };
+
             this.snowSystem.update(time, cameraPosition);
 
-            this.renderer.render(this.scene, this.camera);
+            // Use the XR camera
+            const xrCamera = this.renderer.xr.getCamera(this.camera);
+            this.renderer.render(this.scene, xrCamera);
           }
         }
 
         onSessionEnded() {
           this.xrSession = null;
           this.enterARButton.textContent = 'Enter AR';
-          this.updateStatus('');
-          
+          this.updateStatus('AR session ended');
+
           if (this.snowSystem) {
             this.scene.remove(this.snowSystem.particleSystem);
           }
         }
       }
 
-      // Initialize the app when the page loads
       try {
         window.webxrSnowApp = new WebXRSnowApp();
       } catch (error) {
@@ -246,7 +234,6 @@
       }
     }
 
-    // Call the initialization function
     initWebXRSnowApp();
   </script>
 </body>
